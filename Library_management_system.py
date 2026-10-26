@@ -1,133 +1,266 @@
-books = []
-members = []
-issued_books = []
 
-def add_book():
-    book_id = input("Enter Book ID: ")
-    title = input("Enter Book Title: ")
-    author = input("Enter Author Name: ")
+import streamlit as st
+import sqlite3
+from datetime import date, timedelta
 
-    book = {
-        "id": book_id,
-        "title": title,
-        "author": author
-    }
+conn = sqlite3.connect("library.db", check_same_thread=False)
+cur = conn.cursor()
 
-    books.append(book)
-    print("Book added successfully!")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS books(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    author TEXT,
+    quantity INTEGER
+)
+""")
 
+cur.execute("""
+CREATE TABLE IF NOT EXISTS members(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    member_type TEXT
+)
+""")
 
-def view_books():
-    if not books:
-        print("No books available.")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS issues(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER,
+    member_id INTEGER,
+    issue_date TEXT,
+    due_date TEXT,
+    returned INTEGER DEFAULT 0
+)
+""")
+
+conn.commit()
+
+st.title("Library Management System")
+
+menu = st.sidebar.selectbox("Menu", [
+    "Add Book",
+    "Search Books",
+    "Delete Book",
+    "Register Member",
+    "Issue Book",
+    "Return Book",
+    "Overdue Books"
+])
+
+if menu == "Add Book":
+    st.header("Add Book")
+
+    title = st.text_input("Book Title")
+    author = st.text_input("Author")
+    quantity = st.number_input("Quantity", min_value=1, step=1)
+
+    if st.button("Add Book"):
+        if title.strip() and author.strip():
+            cur.execute(
+                "INSERT INTO books(title, author, quantity) VALUES(?,?,?)",
+                (title, author, quantity)
+            )
+            conn.commit()
+            st.success("Book added successfully")
+        else:
+            st.error("Enter book title and author")
+
+elif menu == "Search Books":
+    st.header("Search Books")
+
+    search = st.text_input("Enter title or author")
+
+    cur.execute(
+        "SELECT * FROM books WHERE title LIKE ? OR author LIKE ?",
+        ("%" + search + "%", "%" + search + "%")
+    )
+
+    st.dataframe(
+        [{"ID": r[0], "Title": r[1], "Author": r[2],
+          "Quantity": r[3]} for r in cur.fetchall()],
+        use_container_width=True
+    )
+
+elif menu == "Delete Book":
+    st.header("Delete Book")
+
+    cur.execute("SELECT * FROM books")
+    books = cur.fetchall()
+
+    if books:
+        book_id = st.selectbox(
+            "Select Book",
+            [b[0] for b in books],
+            format_func=lambda x: next(
+                f"{b[1]} by {b[2]}" for b in books if b[0] == x
+            )
+        )
+
+        if st.button("Delete"):
+            cur.execute(
+                "SELECT COUNT(*) FROM issues WHERE book_id=? AND returned=0",
+                (book_id,)
+            )
+
+            if cur.fetchone()[0] > 0:
+                st.error("This book is currently issued")
+            else:
+                cur.execute("DELETE FROM issues WHERE book_id=?", (book_id,))
+                cur.execute("DELETE FROM books WHERE id=?", (book_id,))
+                conn.commit()
+                st.success("Book deleted")
+                st.rerun()
     else:
-        print("\n--- Book List ---")
-        for book in books:
-            print("ID:", book["id"])
-            print("Title:", book["title"])
-            print("Author:", book["author"])
-            print("-------------------")
+        st.info("No books available")
 
+elif menu == "Register Member":
+    st.header("Register Member")
 
-def search_book():
-    book_id = input("Enter Book ID to search: ")
+    name = st.text_input("Member Name")
+    member_type = st.selectbox("Member Type", ["Student", "Teacher"])
 
-    for book in books:
-        if book["id"] == book_id:
-            print("Book Found!")
-            print("Title:", book["title"])
-            print("Author:", book["author"])
-            return
+    if st.button("Register"):
+        if name.strip():
+            cur.execute(
+                "INSERT INTO members(name, member_type) VALUES(?,?)",
+                (name, member_type)
+            )
+            conn.commit()
+            st.success("Member registered")
+        else:
+            st.error("Enter member name")
 
-    print("Book not found.")
+elif menu == "Issue Book":
+    st.header("Issue Book")
 
+    cur.execute("SELECT * FROM books WHERE quantity > 0")
+    books = cur.fetchall()
 
-def add_member():
-    member_id = input("Enter Member ID: ")
-    name = input("Enter Member Name: ")
+    cur.execute("SELECT * FROM members")
+    members = cur.fetchall()
 
-    member = {
-        "id": member_id,
-        "name": name
-    }
+    if books and members:
+        book_id = st.selectbox(
+            "Select Book",
+            [b[0] for b in books],
+            format_func=lambda x: next(
+                b[1] for b in books if b[0] == x
+            )
+        )
 
-    members.append(member)
-    print("Member registered successfully!")
+        member_id = st.selectbox(
+            "Select Member",
+            [m[0] for m in members],
+            format_func=lambda x: next(
+                f"{m[1]} ({m[2]})" for m in members if m[0] == x
+            )
+        )
 
+        if st.button("Issue"):
+            member = next(m for m in members if m[0] == member_id)
 
-def view_members():
-    if not members:
-        print("No members registered.")
+            cur.execute(
+                "SELECT COUNT(*) FROM issues WHERE member_id=? AND returned=0",
+                (member_id,)
+            )
+            count = cur.fetchone()[0]
+
+            limit = 3 if member[2] == "Student" else 5
+
+            if count >= limit:
+                st.error(f"Borrow limit is {limit} books")
+            else:
+                today = date.today()
+                due = today + timedelta(days=14)
+
+                cur.execute(
+                    """INSERT INTO issues
+                    (book_id, member_id, issue_date, due_date)
+                    VALUES(?,?,?,?)""",
+                    (book_id, member_id, str(today), str(due))
+                )
+
+                cur.execute(
+                    "UPDATE books SET quantity=quantity-1 WHERE id=?",
+                    (book_id,)
+                )
+
+                conn.commit()
+                st.success(f"Book issued. Due date: {due}")
+                st.rerun()
     else:
-        print("\n--- Member List ---")
-        for member in members:
-            print("ID:", member["id"])
-            print("Name:", member["name"])
-            print("-------------------")
+        st.warning("Add a book and register a member first")
 
+elif menu == "Return Book":
+    st.header("Return Book")
 
-def issue_book():
-    book_id = input("Enter Book ID to issue: ")
-    member_id = input("Enter Member ID: ")
+    cur.execute("""
+        SELECT issues.id, books.title, members.name, issues.due_date
+        FROM issues
+        JOIN books ON books.id=issues.book_id
+        JOIN members ON members.id=issues.member_id
+        WHERE issues.returned=0
+    """)
 
-    book_exists = any(book["id"] == book_id for book in books)
-    member_exists = any(member["id"] == member_id for member in members)
+    issues = cur.fetchall()
 
-    if not book_exists:
-        print("Book not found.")
-    elif not member_exists:
-        print("Member not found.")
-    elif any(item["book_id"] == book_id for item in issued_books):
-        print("Book is already issued.")
+    if issues:
+        issue_id = st.selectbox(
+            "Select Issued Book",
+            [i[0] for i in issues],
+            format_func=lambda x: next(
+                f"{i[1]} - {i[2]} (Due: {i[3]})"
+                for i in issues if i[0] == x
+            )
+        )
+
+        if st.button("Return"):
+            issue = next(i for i in issues if i[0] == issue_id)
+            late_days = max(
+                (date.today() - date.fromisoformat(issue[3])).days, 0
+            )
+            fine = late_days * 10
+
+            cur.execute(
+                "UPDATE issues SET returned=1 WHERE id=?",
+                (issue_id,)
+            )
+
+            cur.execute(
+                "UPDATE books SET quantity=quantity+1 WHERE id=?",
+                (issue[0] and next(
+                    b[0] for b in conn.execute(
+                        "SELECT id, title FROM books"
+                    ).fetchall() if b[1] == issue[1]
+                ),)
+            )
+
+            conn.commit()
+            st.success(f"Book returned. Fine: Rs. {fine}")
+            st.rerun()
     else:
-        issued_books.append({
-            "book_id": book_id,
-            "member_id": member_id
-        })
-        print("Book issued successfully!")
+        st.info("No books are currently issued")
 
+elif menu == "Overdue Books":
+    st.header("Overdue Books")
 
-def return_book():
-    book_id = input("Enter Book ID to return: ")
+    cur.execute("""
+        SELECT books.title, members.name, issues.due_date
+        FROM issues
+        JOIN books ON books.id=issues.book_id
+        JOIN members ON members.id=issues.member_id
+        WHERE issues.returned=0 AND issues.due_date < ?
+    """, (str(date.today()),))
 
-    for item in issued_books:
-        if item["book_id"] == book_id:
-            issued_books.remove(item)
-            print("Book returned successfully!")
-            return
+    overdue = cur.fetchall()
 
-    print("This book is not currently issued.")
-
-
-while True:
-    print("\n===== LIBRARY MANAGEMENT SYSTEM =====")
-    print("1. Add Book")
-    print("2. View Books")
-    print("3. Search Book")
-    print("4. Register Member")
-    print("5. View Members")
-    print("6. Issue Book")
-    print("7. Return Book")
-    print("8. Exit")
-
-    choice = input("Enter your choice: ")
-
-    if choice == "1":
-        add_book()
-    elif choice == "2":
-        view_books()
-    elif choice == "3":
-        search_book()
-    elif choice == "4":
-        add_member()
-    elif choice == "5":
-        view_members()
-    elif choice == "6":
-        issue_book()
-    elif choice == "7":
-        return_book()
-    elif choice == "8":
-        print("Thank you for using the Library Management System!")
-        break
+    if overdue:
+        for book, member, due in overdue:
+            days = (date.today() - date.fromisoformat(due)).days
+            st.write(
+                f"Book: {book} | Member: {member} | "
+                f"Due: {due} | Fine: Rs. {days * 10}"
+            )
     else:
-        print("Invalid choice. Please try again.")
+        st.success("No overdue books")
